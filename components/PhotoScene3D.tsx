@@ -14,6 +14,8 @@ type PhotoRecord = {
 
 type Props = {
   photos: PhotoRecord[];
+  // 3D空間の中心地点。指定がなければ最初の写真の位置を使う
+  origin?: { lat: number; lng: number };
 };
 
 const TILE_ZOOM = 16;
@@ -121,7 +123,7 @@ async function buildGroundTexture(
   }
 }
 
-export default function PhotoScene3D({ photos }: Props) {
+export default function PhotoScene3D({ photos, origin }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -146,8 +148,8 @@ export default function PhotoScene3D({ photos }: Props) {
     dirLight.position.set(3, 5, 2);
     scene.add(dirLight);
 
-    const originLat = photos[0].lat;
-    const originLng = photos[0].lng;
+    const originLat = origin?.lat ?? photos[0].lat;
+    const originLng = origin?.lng ?? photos[0].lng;
 
     const fallbackGround = new THREE.Mesh(
       new THREE.PlaneGeometry(60, 60),
@@ -322,7 +324,7 @@ export default function PhotoScene3D({ photos }: Props) {
       renderer.dispose();
       container.removeChild(renderer.domElement);
     };
-  }, [photos]);
+  }, [photos, origin?.lat, origin?.lng]);
 
   if (photos.length === 0) {
     return (

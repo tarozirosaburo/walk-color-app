@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import WalkMap from '@/components/WalkMap';
 import PhotoScene3D from '@/components/PhotoScene3D';
 import { supabase, toGridId } from '@/lib/supabase';
@@ -12,50 +12,49 @@ type PhotoRecord = {
   heading: number | null;
 };
 
-// 端末の方位センサーから、その瞬間の方位(0〜360度、北=0)を1回だけ取得する
-function getCurrentHeading(): Promise<number | null> {
-  return new Promise((resolve) => {
-    const w = window as any;
-
-    const handler = (event: any) => {
-      window.removeEventListener('deviceorientation', handler);
-      // iOSは webkitCompassHeading、Androidなどは alpha(360-alphaで北基準に変換)を使う
-      if (typeof event.webkitCompassHeading === 'number') {
-        resolve(event.webkitCompassHeading);
-      } else if (typeof event.alpha === 'number') {
-        resolve(360 - event.alpha);
-      } else {
-        resolve(null);
-      }
-    };
-
-    // iOS Safariは事前に許可を求める必要がある
-    if (typeof w.DeviceOrientationEvent?.requestPermission === 'function') {
-      w.DeviceOrientationEvent.requestPermission()
-        .then((result: string) => {
-          if (result === 'granted') {
-            window.addEventListener('deviceorientation', handler, { once: true });
-            // 一定時間イベントが来なければ諦める
-            setTimeout(() => resolve(null), 1500);
-          } else {
-            resolve(null);
-          }
-        })
-        .catch(() => resolve(null));
-    } else if ('DeviceOrientationEvent' in window) {
-      window.addEventListener('deviceorientation', handler, { once: true });
-      setTimeout(() => resolve(null), 1500);
-    } else {
-      resolve(null);
-    }
-  });
-}
+const DEFAULT_CENTER = { lat: 37.9161, lng: 139.0364 };
 
 export default function Home() {
   const [status, setStatus] = useState('');
   const [coloredGridIds, setColoredGridIds] = useState<string[]>([]);
   const [photos, setPhotos] = useState<PhotoRecord[]>([]);
   const [showScene3D, setShowScene3D] = useState(false);
+  const [scene3DOrigin, setScene3DOrigin] = useState<{ lat: number; lng: number } | null>(null);
+  const [needsIOSPermission, setNeedsIOSPermission] = useState(false);
+  const [iosPermissionGranted, setIosPermissionGranted] = useState(false);
+
+  // 方位センサーの最新値を保持し続ける(撮影の瞬間だけ読みに行くと、値が安定する前に取得してしまい失敗しやすいため)
+  const headingRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    const w = window as any;
+    if (typeof w.DeviceOrientationEvent?.requestPermission === 'function') {
+      // iOSは明示的な許可が必要なので、ボタンを表示する
+      setNeedsIOSPermission(true);
+    }
+
+    function handler(event: any) {
+      if (typeof event.webkitCompassHeading === 'number') {
+        headingRef.current = event.webkitCompassHeading;
+      } else if (typeof event.alpha === 'number') {
+        headingRef.current = 360 - event.alpha;
+      }
+    }
+    window.addEventListener('deviceorientation', handler);
+    return () => window.removeEventListener('deviceorientation', handler);
+  }, []);
+
+  async function requestIOSPermission() {
+    const w = window as any;
+    try {
+      const result = await w.DeviceOrientationEvent.requestPermission();
+      if (result === 'granted') {
+        setIosPermissionGranted(true);
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  }
 
   const fetchColoredCells = useCallback(async () => {
     const { data, error } = await supabase.from('grid_cells').select('grid_id');
@@ -83,9 +82,8 @@ export default function Home() {
   }, [fetchColoredCells, fetchPhotos]);
 
   async function handleCapture(file: File) {
-    setStatus('位置情報と方位を取得中...');
-
-    const heading = await getCurrentHeading();
+    setStatus('位置情報を取得中...');
+    const heading = headingRef.current;
 
     navigator.geolocation.getCurrentPosition(async (position) => {
       const { latitude, longitude } = position.coords;
@@ -125,6 +123,13 @@ export default function Home() {
     });
   }
 
+  function handleLocationSelect(lat: number, lng: number) {
+    setScene3DOrigin({ lat, lng });
+    setShowScene3D(true);
+  }
+
+  const scene3DCenter = scene3DOrigin ?? (photos[0] ? { lat: photos[0].lat, lng: photos[0].lng } : null);
+
   return (
     <main style={{ maxWidth: 480, margin: '0 auto', padding: '1rem' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -144,11 +149,39 @@ export default function Home() {
         </button>
       </div>
 
+      {needsIOSPermission && !iosPermissionGranted && (
+        <button
+          onClick={requestIOSPermission}
+          style={{
+            marginTop: 8,
+            width: '100%',
+            border: '1px solid #999',
+            background: '#fafaf7',
+            borderRadius: 8,
+            padding: '8px',
+            fontSize: 13,
+            color: '#555',
+          }}
+        >
+          方位センサーを有効にする(iOSのみ必要)
+        </button>
+      )}
+
       <div style={{ marginTop: '1rem' }}>
         {showScene3D ? (
-          <PhotoScene3D photos={photos} />
+          <PhotoScene3D photos={photos} origin={scene3DCenter ?? undefined} />
         ) : (
-          <WalkMap centerLat={37.9161} centerLng={139.0364} coloredGridIds={coloredGridIds} />
+          <>
+            <WalkMap
+              centerLat={DEFAULT_CENTER.lat}
+              centerLng={DEFAULT_CENTER.lng}
+              coloredGridIds={coloredGridIds}
+              onLocationSelect={handleLocationSelect}
+            />
+            <p style={{ fontSize: 12, color: '#888', marginTop: 6 }}>
+              地図をタップすると、その場所を中心に3D表示します
+            </p>
+          </>
         )}
       </div>
 

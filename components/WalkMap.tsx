@@ -10,6 +10,8 @@ type Props = {
   centerLng: number;
   // 塗られたグリッドIDの一覧。DBから取得して渡す
   coloredGridIds: string[];
+  // 地図がタップされたときに、その地点の緯度経度を伝える
+  onLocationSelect?: (lat: number, lng: number) => void;
 };
 
 const OSM_STYLE: maplibregl.StyleSpecification = {
@@ -42,13 +44,17 @@ function cellToScreenPolygon(map: maplibregl.Map, gridId: string): string {
     .join(' ');
 }
 
-export default function WalkMap({ centerLat, centerLng, coloredGridIds }: Props) {
+export default function WalkMap({ centerLat, centerLng, coloredGridIds, onLocationSelect }: Props) {
   const grayContainerRef = useRef<HTMLDivElement>(null);
   const colorContainerRef = useRef<HTMLDivElement>(null);
   const grayMapRef = useRef<maplibregl.Map | null>(null);
   const colorMapRef = useRef<maplibregl.Map | null>(null);
   const [polygons, setPolygons] = useState<string[]>([]);
   const clipId = 'walk-color-clip';
+  const onLocationSelectRef = useRef(onLocationSelect);
+  useEffect(() => {
+    onLocationSelectRef.current = onLocationSelect;
+  }, [onLocationSelect]);
 
   // 地図を2枚(白黒・カラー)初期化し、白黒側の操作にカラー側を追従させる
   useEffect(() => {
@@ -98,6 +104,10 @@ export default function WalkMap({ centerLat, centerLng, coloredGridIds }: Props)
 
     grayMap.on('load', updateClip);
     colorMap.on('load', updateClip);
+
+    grayMap.on('click', (e) => {
+      onLocationSelectRef.current?.(e.lngLat.lat, e.lngLat.lng);
+    });
 
     return () => {
       grayMap.remove();
