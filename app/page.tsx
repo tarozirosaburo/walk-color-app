@@ -25,6 +25,7 @@ export default function Home() {
 
   // 方位センサーの最新値を保持し続ける(撮影の瞬間だけ読みに行くと、値が安定する前に取得してしまい失敗しやすいため)
   const headingRef = useRef<number | null>(null);
+  const [debugHeading, setDebugHeading] = useState<{ heading: number | null; raw: string } | null>(null);
 
   useEffect(() => {
     const w = window as any;
@@ -46,6 +47,10 @@ export default function Home() {
     function handler(event: any) {
       const h = extractHeading(event);
       if (h !== null) headingRef.current = h;
+      setDebugHeading({
+        heading: h,
+        raw: `alpha=${event.alpha} absolute=${event.absolute} webkitCompassHeading=${(event as any).webkitCompassHeading}`,
+      });
     }
 
     // 機種によっては deviceorientationabsolute の方が方位の精度が高いため、両方拾う
@@ -211,6 +216,12 @@ export default function Home() {
           方位センサーを有効にする(iOSのみ必要)
         </button>
       )}
+
+      <div style={{ marginTop: 8, fontSize: 11, color: '#999', background: '#fafaf7', padding: 8, borderRadius: 8 }}>
+        [デバッグ] センサー生データ: {debugHeading ? debugHeading.raw : 'イベント未受信'}
+        <br />
+        [デバッグ] 計算後の方位: {debugHeading?.heading ?? 'なし'}
+      </div>
 
       <div style={{ marginTop: '1rem' }}>
         {showScene3D ? (
