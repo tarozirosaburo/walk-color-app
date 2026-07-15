@@ -3,7 +3,7 @@
 import { useEffect, useRef } from 'react';
 import * as THREE from 'three';
 import { supabase } from '@/lib/supabase';
-import { latLngToLocalMeters } from '@/lib/geo';
+import { latLngToLocalMeters, lonLatToTileXY, tileXYToLonLat } from '@/lib/geo';
 
 type PhotoRecord = {
   file_path: string;
@@ -16,6 +16,82 @@ type Props = {
   photos: PhotoRecord[];
 };
 
+const TILE_ZOOM = 16;
+const TILE_SIZE = 256;
+// 原点タイルを中心に、縦横何タイル分を貼り合わせるか(3なら3x3=9枚)
+const TILE_RADIUS = 1;
+
+// CARTOの無料ベースマップタイル(クロスオリジン許可あり、WebGLのテクスチャとして安全に使える)
+function tileUrl(x: number, y: number, z: number) {
+  return `https://basemaps.cartocdn.com/light_all/${z}/${x}/${y}.png`;
+}
+
+// 原点付近のタイルを貼り合わせて1枚のキャンバステクスチャを作り、
+// あわせてその範囲の実際の地面サイズ(メートル)を返す
+async function buildGroundTexture(
+  originLat: number,
+  originLng: number
+): Promise<{ texture: THREE.CanvasTexture; width: number; depth: number; centerX: number; centerZ: number } | null> {
+  try {
+    const center = lonLatToTileXY(originLng, originLat, TILE_ZOOM);
+    const cx = Math.floor(center.x);
+    const cy = Math.floor(center.y);
+
+    const span = TILE_RADIUS * 2 + 1;
+    const canvas = document.createElement('canvas');
+    canvas.width = TILE_SIZE * span;
+    canvas.height = TILE_SIZE * span;
+    const ctx = canvas.getContext('2d')!;
+
+    const loadImage = (url: string) =>
+      new Promise<HTMLImageElement>((resolve, reject) => {
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.onload = () => resolve(img);
+        img.onerror = reject;
+        img.src = url;
+      });
+
+    const tasks: Promise<void>[] = [];
+    for (let dy = -TILE_RADIUS; dy <= TILE_RADIUS; dy++) {
+      for (let dx = -TILE_RADIUS; dx <= TILE_RADIUS; dx++) {
+        const tx = cx + dx;
+        const ty = cy + dy;
+        tasks.push(
+          loadImage(tileUrl(tx, ty, TILE_ZOOM)).then((img) => {
+            ctx.drawImage(
+              img,
+              (dx + TILE_RADIUS) * TILE_SIZE,
+              (dy + TILE_RADIUS) * TILE_SIZE,
+              TILE_SIZE,
+              TILE_SIZE
+            );
+          })
+        );
+      }
+    }
+    await Promise.all(tasks);
+
+    // 貼り合わせた範囲全体(北西の角〜南東の角)の実世界サイズを計算する
+    const nw = tileXYToLonLat(cx - TILE_RADIUS, cy - TILE_RADIUS, TILE_ZOOM);
+    const se = tileXYToLonLat(cx + TILE_RADIUS + 1, cy + TILE_RADIUS + 1, TILE_ZOOM);
+
+    const nwMeters = latLngToLocalMeters(nw.lat, nw.lon, originLat, originLng);
+    const seMeters = latLngToLocalMeters(se.lat, se.lon, originLat, originLng);
+
+    const width = seMeters.x - nwMeters.x;
+    const depth = seMeters.z - nwMeters.z;
+    const centerX = (nwMeters.x + seMeters.x) / 2;
+    const centerZ = (nwMeters.z + seMeters.z) / 2;
+
+    const texture = new THREE.CanvasTexture(canvas);
+    return { texture, width, depth, centerX, centerZ };
+  } catch (err) {
+    console.error('地図タイルの読み込みに失敗しました', err);
+    return null;
+  }
+}
+
 export default function PhotoScene3D({ photos }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -24,6 +100,7 @@ export default function PhotoScene3D({ photos }: Props) {
     if (!container) return;
     if (photos.length === 0) return;
 
+    let disposed = false;
     const width = container.clientWidth;
     const height = 400;
 
@@ -31,7 +108,10 @@ export default function PhotoScene3D({ photos }: Props) {
     const camera = new THREE.PerspectiveCamera(50, width / height, 0.1, 500);
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
     renderer.setSize(width, height);
-    renderer.setPixelRatio(window.devicePixelRatio);
+    // スマホでの描画負荷を抑えるため、解像度倍率に上限を設ける
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    // ドラッグ操作をブラウザのスクロールと競合させない
+    renderer.domElement.style.touchAction = 'none';
     container.appendChild(renderer.domElement);
 
     scene.add(new THREE.AmbientLight(0xffffff, 0.9));
@@ -39,27 +119,39 @@ export default function PhotoScene3D({ photos }: Props) {
     dirLight.position.set(3, 5, 2);
     scene.add(dirLight);
 
-    // 地面を「半透明の地図」らしい見た目にする(道・敷地の区画のような表現)
-    const groundGeo = new THREE.PlaneGeometry(60, 60);
-    const groundMat = new THREE.MeshStandardMaterial({
-      color: 0xf1efe8,
-      transparent: true,
-      opacity: 0.55,
-      side: THREE.DoubleSide,
-    });
-    const ground = new THREE.Mesh(groundGeo, groundMat);
-    ground.rotation.x = -Math.PI / 2;
-    ground.position.y = -0.01;
-    scene.add(ground);
-
-    const grid = new THREE.GridHelper(60, 30, 0xbdbbb5, 0xd8d5cd);
-    (grid.material as THREE.Material).transparent = true;
-    (grid.material as THREE.Material).opacity = 0.5;
-    scene.add(grid);
-
     // 最初の写真の位置を基準点(原点)にする
     const originLat = photos[0].lat;
     const originLng = photos[0].lng;
+
+    // 地面: まずは仮の色付き板を出しておき、地図タイルが読み込めたら差し替える
+    const fallbackGround = new THREE.Mesh(
+      new THREE.PlaneGeometry(60, 60),
+      new THREE.MeshStandardMaterial({
+        color: 0xf1efe8,
+        transparent: true,
+        opacity: 0.55,
+        side: THREE.DoubleSide,
+      })
+    );
+    fallbackGround.rotation.x = -Math.PI / 2;
+    fallbackGround.position.y = -0.02;
+    scene.add(fallbackGround);
+
+    buildGroundTexture(originLat, originLng).then((result) => {
+      if (disposed || !result) return;
+      scene.remove(fallbackGround);
+
+      const mat = new THREE.MeshStandardMaterial({
+        map: result.texture,
+        transparent: true,
+        opacity: 0.75,
+        side: THREE.DoubleSide,
+      });
+      const groundMesh = new THREE.Mesh(new THREE.PlaneGeometry(result.width, result.depth), mat);
+      groundMesh.rotation.x = -Math.PI / 2;
+      groundMesh.position.set(result.centerX, -0.02, result.centerZ);
+      scene.add(groundMesh);
+    });
 
     const textureLoader = new THREE.TextureLoader();
 
@@ -126,6 +218,7 @@ export default function PhotoScene3D({ photos }: Props) {
       autoRotate = false;
       lastX = e.clientX;
       lastY = e.clientY;
+      renderer.domElement.setPointerCapture(e.pointerId);
     };
     const onPointerUp = () => {
       rotating = false;
@@ -142,8 +235,9 @@ export default function PhotoScene3D({ photos }: Props) {
     };
 
     renderer.domElement.addEventListener('pointerdown', onPointerDown);
-    window.addEventListener('pointerup', onPointerUp);
-    window.addEventListener('pointermove', onPointerMove);
+    renderer.domElement.addEventListener('pointerup', onPointerUp);
+    renderer.domElement.addEventListener('pointercancel', onPointerUp);
+    renderer.domElement.addEventListener('pointermove', onPointerMove);
 
     let frameId: number;
     function animate() {
@@ -157,10 +251,12 @@ export default function PhotoScene3D({ photos }: Props) {
     animate();
 
     return () => {
+      disposed = true;
       cancelAnimationFrame(frameId);
       renderer.domElement.removeEventListener('pointerdown', onPointerDown);
-      window.removeEventListener('pointerup', onPointerUp);
-      window.removeEventListener('pointermove', onPointerMove);
+      renderer.domElement.removeEventListener('pointerup', onPointerUp);
+      renderer.domElement.removeEventListener('pointercancel', onPointerUp);
+      renderer.domElement.removeEventListener('pointermove', onPointerMove);
       renderer.dispose();
       container.removeChild(renderer.domElement);
     };
@@ -184,5 +280,26 @@ export default function PhotoScene3D({ photos }: Props) {
     );
   }
 
-  return <div ref={containerRef} style={{ width: '100%', height: 400, borderRadius: 12, overflow: 'hidden', cursor: 'grab' }} />;
+  return (
+    <div style={{ position: 'relative' }}>
+      <div
+        ref={containerRef}
+        style={{ width: '100%', height: 400, borderRadius: 12, overflow: 'hidden', cursor: 'grab' }}
+      />
+      <div
+        style={{
+          position: 'absolute',
+          bottom: 6,
+          right: 10,
+          fontSize: 10,
+          color: '#999',
+          background: 'rgba(255,255,255,0.6)',
+          padding: '1px 6px',
+          borderRadius: 6,
+        }}
+      >
+        © OpenStreetMap contributors © CARTO
+      </div>
+    </div>
+  );
 }

@@ -45,4 +45,3 @@ supabase_schema.sql   DBのテーブル定義
 - [ ] ログイン機能(Supabase Auth)
 - [ ] PWA化してホーム画面に追加できるようにする
 - [ ] 写真一覧・詳細画面
-# walk-color-app
