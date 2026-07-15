@@ -228,20 +228,38 @@ export default function PhotoScene3D({ photos, origin }: Props) {
     let radius = 12;
     const MIN_RADIUS = 3;
     const MAX_RADIUS = 30;
+    // 視点の中心(クリックした地面の位置に動かせるようにする)
+    let targetX = 0;
+    let targetZ = 0;
 
     function updateCamera() {
-      camera.position.x = radius * Math.sin(camAngleY) * Math.cos(camAngleX);
+      camera.position.x = targetX + radius * Math.sin(camAngleY) * Math.cos(camAngleX);
       camera.position.y = radius * Math.sin(camAngleX) + 1;
-      camera.position.z = radius * Math.cos(camAngleY) * Math.cos(camAngleX);
-      camera.lookAt(0, 0.8, 0);
+      camera.position.z = targetZ + radius * Math.cos(camAngleY) * Math.cos(camAngleX);
+      camera.lookAt(targetX, 0.8, targetZ);
     }
     updateCamera();
+
+    // クリックした地面の位置を割り出すためのレイキャスト(y=0の地面と光線の交点を求める)
+    const raycaster = new THREE.Raycaster();
+    const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+    function screenToGround(clientX: number, clientY: number) {
+      const rect = renderer.domElement.getBoundingClientRect();
+      const ndcX = ((clientX - rect.left) / rect.width) * 2 - 1;
+      const ndcY = -(((clientY - rect.top) / rect.height) * 2 - 1);
+      raycaster.setFromCamera(new THREE.Vector2(ndcX, ndcY), camera);
+      const point = new THREE.Vector3();
+      const hit = raycaster.ray.intersectPlane(groundPlane, point);
+      return hit ? point : null;
+    }
 
     let autoRotate = true;
     // 現在押されている指(ポインター)を管理し、1本指=回転、2本指=ピンチ拡大縮小を判定する
     const activePointers = new Map<number, { x: number; y: number }>();
     let pinchStartDist = 0;
     let pinchStartRadius = radius;
+    // ドラッグかタップ(クリック)かを区別するための移動量の積算
+    let dragDistance = 0;
 
     function distanceBetween(a: { x: number; y: number }, b: { x: number; y: number }) {
       return Math.hypot(a.x - b.x, a.y - b.y);
@@ -251,6 +269,7 @@ export default function PhotoScene3D({ photos, origin }: Props) {
       autoRotate = false;
       renderer.domElement.setPointerCapture(e.pointerId);
       activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      dragDistance = 0;
 
       if (activePointers.size === 2) {
         const pts = Array.from(activePointers.values());
@@ -260,12 +279,24 @@ export default function PhotoScene3D({ photos, origin }: Props) {
     };
 
     const onPointerUp = (e: PointerEvent) => {
+      const wasSinglePointer = activePointers.size === 1;
       activePointers.delete(e.pointerId);
+
+      // ほとんど動かさずに指を離した場合は「タップ」とみなし、その地面の位置に視点を移動する
+      if (wasSinglePointer && dragDistance < 6) {
+        const point = screenToGround(e.clientX, e.clientY);
+        if (point) {
+          targetX = point.x;
+          targetZ = point.z;
+          updateCamera();
+        }
+      }
     };
 
     const onPointerMove = (e: PointerEvent) => {
       if (!activePointers.has(e.pointerId)) return;
       const prev = activePointers.get(e.pointerId)!;
+      dragDistance += Math.abs(e.clientX - prev.x) + Math.abs(e.clientY - prev.y);
 
       if (activePointers.size === 2) {
         activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });

@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import WalkMap from '@/components/WalkMap';
 import PhotoScene3D from '@/components/PhotoScene3D';
+import PhotoManager from '@/components/PhotoManager';
 import { supabase, toGridId } from '@/lib/supabase';
 
 type PhotoRecord = {
@@ -14,17 +15,33 @@ type PhotoRecord = {
 
 const DEFAULT_CENTER = { lat: 37.9161, lng: 139.0364 };
 
+type ViewMode = 'map' | 'scene3d' | 'manage';
+
 export default function Home() {
   const [status, setStatus] = useState('');
   const [coloredGridIds, setColoredGridIds] = useState<string[]>([]);
   const [photos, setPhotos] = useState<PhotoRecord[]>([]);
-  const [showScene3D, setShowScene3D] = useState(false);
+  const [viewMode, setViewMode] = useState<ViewMode>('map');
   const [scene3DOrigin, setScene3DOrigin] = useState<{ lat: number; lng: number } | null>(null);
+  const [mapCenter, setMapCenter] = useState(DEFAULT_CENTER);
   const [needsIOSPermission, setNeedsIOSPermission] = useState(false);
   const [iosPermissionGranted, setIosPermissionGranted] = useState(false);
 
   // 方位センサーの最新値を保持し続ける(撮影の瞬間だけ読みに行くと、値が安定する前に取得してしまい失敗しやすいため)
   const headingRef = useRef<number | null>(null);
+
+  // 初期表示時に、現在地を取得できればそこを地図の中心にする(取得できなければ既定の場所のまま)
+  useEffect(() => {
+    if (!('geolocation' in navigator)) return;
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        setMapCenter({ lat: position.coords.latitude, lng: position.coords.longitude });
+      },
+      () => {
+        // 許可されなかった場合などは既定の場所のままにする
+      }
+    );
+  }, []);
 
   useEffect(() => {
     const w = window as any;
@@ -170,28 +187,43 @@ export default function Home() {
 
   function handleLocationSelect(lat: number, lng: number) {
     setScene3DOrigin({ lat, lng });
-    setShowScene3D(true);
+    setViewMode('scene3d');
   }
 
   const scene3DCenter = scene3DOrigin ?? (photos[0] ? { lat: photos[0].lat, lng: photos[0].lng } : null);
 
   return (
     <main style={{ maxWidth: 480, margin: '0 auto', padding: '1rem' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 6 }}>
         <h1 style={{ margin: 0 }}>散歩の地図</h1>
-        <button
-          onClick={() => setShowScene3D((v) => !v)}
-          style={{
-            border: '1px solid #0F6E56',
-            color: '#0F6E56',
-            background: 'white',
-            borderRadius: 8,
-            padding: '6px 12px',
-            fontSize: 13,
-          }}
-        >
-          {showScene3D ? '地図表示に戻る' : '3D写真空間を見る'}
-        </button>
+        <div style={{ display: 'flex', gap: 6 }}>
+          <button
+            onClick={() => setViewMode(viewMode === 'scene3d' ? 'map' : 'scene3d')}
+            style={{
+              border: '1px solid #0F6E56',
+              color: '#0F6E56',
+              background: 'white',
+              borderRadius: 8,
+              padding: '6px 10px',
+              fontSize: 12,
+            }}
+          >
+            {viewMode === 'scene3d' ? '地図表示に戻る' : '3D写真空間を見る'}
+          </button>
+          <button
+            onClick={() => setViewMode(viewMode === 'manage' ? 'map' : 'manage')}
+            style={{
+              border: '1px solid #999',
+              color: '#555',
+              background: 'white',
+              borderRadius: 8,
+              padding: '6px 10px',
+              fontSize: 12,
+            }}
+          >
+            {viewMode === 'manage' ? '戻る' : '写真を管理'}
+          </button>
+        </div>
       </div>
 
       {needsIOSPermission && !iosPermissionGranted && (
@@ -213,13 +245,15 @@ export default function Home() {
       )}
 
       <div style={{ marginTop: '1rem' }}>
-        {showScene3D ? (
-          <PhotoScene3D photos={photos} origin={scene3DCenter ?? undefined} />
-        ) : (
+        {viewMode === 'scene3d' && <PhotoScene3D photos={photos} origin={scene3DCenter ?? undefined} />}
+
+        {viewMode === 'manage' && <PhotoManager photos={photos} onDeleted={fetchPhotos} />}
+
+        {viewMode === 'map' && (
           <>
             <WalkMap
-              centerLat={DEFAULT_CENTER.lat}
-              centerLng={DEFAULT_CENTER.lng}
+              centerLat={mapCenter.lat}
+              centerLng={mapCenter.lng}
               coloredGridIds={coloredGridIds}
               onLocationSelect={handleLocationSelect}
             />
