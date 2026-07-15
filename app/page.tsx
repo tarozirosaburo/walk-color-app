@@ -33,16 +33,61 @@ export default function Home() {
       setNeedsIOSPermission(true);
     }
 
-    function handler(event: any) {
+    function extractHeading(event: any): number | null {
       if (typeof event.webkitCompassHeading === 'number') {
-        headingRef.current = event.webkitCompassHeading;
-      } else if (typeof event.alpha === 'number') {
-        headingRef.current = 360 - event.alpha;
+        return event.webkitCompassHeading;
       }
+      if (typeof event.alpha === 'number') {
+        return 360 - event.alpha;
+      }
+      return null;
     }
+
+    function handler(event: any) {
+      const h = extractHeading(event);
+      if (h !== null) headingRef.current = h;
+    }
+
+    // 機種によっては deviceorientationabsolute の方が方位の精度が高いため、両方拾う
     window.addEventListener('deviceorientation', handler);
-    return () => window.removeEventListener('deviceorientation', handler);
+    window.addEventListener('deviceorientationabsolute', handler as any);
+    return () => {
+      window.removeEventListener('deviceorientation', handler);
+      window.removeEventListener('deviceorientationabsolute', handler as any);
+    };
   }, []);
+
+  // カメラアプリから戻った直後などでheadingRefがまだ空の場合、短時間だけ新しい値を待つ
+  function waitForHeading(timeoutMs: number): Promise<number | null> {
+    if (headingRef.current !== null) {
+      return Promise.resolve(headingRef.current);
+    }
+    return new Promise((resolve) => {
+      const timeout = setTimeout(() => {
+        window.removeEventListener('deviceorientation', onEvent);
+        window.removeEventListener('deviceorientationabsolute', onEvent as any);
+        resolve(null);
+      }, timeoutMs);
+
+      function onEvent(event: any) {
+        const h =
+          typeof (event as any).webkitCompassHeading === 'number'
+            ? (event as any).webkitCompassHeading
+            : typeof event.alpha === 'number'
+            ? 360 - event.alpha
+            : null;
+        if (h === null) return;
+        clearTimeout(timeout);
+        window.removeEventListener('deviceorientation', onEvent);
+        window.removeEventListener('deviceorientationabsolute', onEvent as any);
+        headingRef.current = h;
+        resolve(h);
+      }
+
+      window.addEventListener('deviceorientation', onEvent);
+      window.addEventListener('deviceorientationabsolute', onEvent as any);
+    });
+  }
 
   async function requestIOSPermission() {
     const w = window as any;
@@ -83,7 +128,7 @@ export default function Home() {
 
   async function handleCapture(file: File) {
     setStatus('位置情報を取得中...');
-    const heading = headingRef.current;
+    const heading = await waitForHeading(1000);
 
     navigator.geolocation.getCurrentPosition(async (position) => {
       const { latitude, longitude } = position.coords;
