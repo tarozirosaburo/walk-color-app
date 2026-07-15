@@ -4,6 +4,7 @@ import { useEffect, useState, useCallback, useRef } from 'react';
 import WalkMap from '@/components/WalkMap';
 import PhotoScene3D from '@/components/PhotoScene3D';
 import PhotoManager from '@/components/PhotoManager';
+import Login from '@/components/Login';
 import { supabase, toGridId } from '@/lib/supabase';
 
 type PhotoRecord = {
@@ -18,6 +19,7 @@ const DEFAULT_CENTER = { lat: 37.9161, lng: 139.0364 };
 type ViewMode = 'map' | 'scene3d' | 'manage';
 
 export default function Home() {
+  const [session, setSession] = useState<any>(undefined); // undefined=確認中, null=未ログイン
   const [status, setStatus] = useState('');
   const [coloredGridIds, setColoredGridIds] = useState<string[]>([]);
   const [photos, setPhotos] = useState<PhotoRecord[]>([]);
@@ -29,6 +31,15 @@ export default function Home() {
 
   // 方位センサーの最新値を保持し続ける(撮影の瞬間だけ読みに行くと、値が安定する前に取得してしまい失敗しやすいため)
   const headingRef = useRef<number | null>(null);
+
+  // ログイン状態を確認し、変化があれば追従する
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => setSession(data.session));
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, newSession) => {
+      setSession(newSession);
+    });
+    return () => listener.subscription.unsubscribe();
+  }, []);
 
   // 初期表示時に、現在地を取得できればそこを地図の中心にする(取得できなければ既定の場所のまま)
   useEffect(() => {
@@ -192,6 +203,18 @@ export default function Home() {
 
   const scene3DCenter = scene3DOrigin ?? (photos[0] ? { lat: photos[0].lat, lng: photos[0].lng } : null);
 
+  if (session === undefined) {
+    return (
+      <main style={{ maxWidth: 480, margin: '4rem auto', padding: '1rem', textAlign: 'center', color: '#888' }}>
+        読み込み中...
+      </main>
+    );
+  }
+
+  if (session === null) {
+    return <Login />;
+  }
+
   return (
     <main style={{ maxWidth: 480, margin: '0 auto', padding: '1rem' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 6 }}>
@@ -222,6 +245,19 @@ export default function Home() {
             }}
           >
             {viewMode === 'manage' ? '戻る' : '写真を管理'}
+          </button>
+          <button
+            onClick={() => supabase.auth.signOut()}
+            style={{
+              border: '1px solid #ccc',
+              color: '#888',
+              background: 'white',
+              borderRadius: 8,
+              padding: '6px 10px',
+              fontSize: 12,
+            }}
+          >
+            ログアウト
           </button>
         </div>
       </div>
