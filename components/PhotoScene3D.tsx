@@ -2,8 +2,8 @@
 
 import { useEffect, useRef } from 'react';
 import * as THREE from 'three';
-import { supabase } from '@/lib/supabase';
-import { latLngToLocalMeters, lonLatToTileXY, tileXYToLonLat } from '@/lib/geo';
+import { supabase, toGridId, gridIdToBounds } from '@/lib/supabase';
+import { latLngToLocalMeters, lonLatToTileXY, tileXYToLonLat, lonLatToGlobalPixel } from '@/lib/geo';
 
 type PhotoRecord = {
   file_path: string;
@@ -18,64 +18,93 @@ type Props = {
 
 const TILE_ZOOM = 16;
 const TILE_SIZE = 256;
-// 原点タイルを中心に、縦横何タイル分を貼り合わせるか(3なら3x3=9枚)
+// 原点タイルを中心に、縦横何タイル分を貼り合わせるか(半径1なら3x3=9枚)
 const TILE_RADIUS = 1;
 
 // CARTOの無料ベースマップタイル(クロスオリジン許可あり、WebGLのテクスチャとして安全に使える)
-function tileUrl(x: number, y: number, z: number) {
-  return `https://basemaps.cartocdn.com/light_all/${z}/${x}/${y}.png`;
+// カラー版(voyager)とモノクロ版(light_all)の2種類を使い分ける
+function colorTileUrl(x: number, y: number, z: number) {
+  return `https://basemaps.cartocdn.com/rastertiles/voyager_nolabels/${z}/${x}/${y}.png`;
+}
+function grayTileUrl(x: number, y: number, z: number) {
+  return `https://basemaps.cartocdn.com/light_nolabels/${z}/${x}/${y}.png`;
 }
 
-// 原点付近のタイルを貼り合わせて1枚のキャンバステクスチャを作り、
-// あわせてその範囲の実際の地面サイズ(メートル)を返す
+function loadImage(url: string) {
+  return new Promise<HTMLImageElement>((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => resolve(img);
+    img.onerror = reject;
+    img.src = url;
+  });
+}
+
+// 原点付近のタイルを貼り合わせ、「歩いたマスだけカラー・それ以外は白黒」のテクスチャを作る
 async function buildGroundTexture(
   originLat: number,
-  originLng: number
+  originLng: number,
+  coloredGridIds: string[]
 ): Promise<{ texture: THREE.CanvasTexture; width: number; depth: number; centerX: number; centerZ: number } | null> {
   try {
     const center = lonLatToTileXY(originLng, originLat, TILE_ZOOM);
     const cx = Math.floor(center.x);
     const cy = Math.floor(center.y);
-
     const span = TILE_RADIUS * 2 + 1;
-    const canvas = document.createElement('canvas');
-    canvas.width = TILE_SIZE * span;
-    canvas.height = TILE_SIZE * span;
-    const ctx = canvas.getContext('2d')!;
 
-    const loadImage = (url: string) =>
-      new Promise<HTMLImageElement>((resolve, reject) => {
-        const img = new Image();
-        img.crossOrigin = 'anonymous';
-        img.onload = () => resolve(img);
-        img.onerror = reject;
-        img.src = url;
-      });
+    const grayCanvas = document.createElement('canvas');
+    grayCanvas.width = TILE_SIZE * span;
+    grayCanvas.height = TILE_SIZE * span;
+    const grayCtx = grayCanvas.getContext('2d')!;
+
+    const colorCanvas = document.createElement('canvas');
+    colorCanvas.width = TILE_SIZE * span;
+    colorCanvas.height = TILE_SIZE * span;
+    const colorCtx = colorCanvas.getContext('2d')!;
 
     const tasks: Promise<void>[] = [];
     for (let dy = -TILE_RADIUS; dy <= TILE_RADIUS; dy++) {
       for (let dx = -TILE_RADIUS; dx <= TILE_RADIUS; dx++) {
         const tx = cx + dx;
         const ty = cy + dy;
+        const px = (dx + TILE_RADIUS) * TILE_SIZE;
+        const py = (dy + TILE_RADIUS) * TILE_SIZE;
         tasks.push(
-          loadImage(tileUrl(tx, ty, TILE_ZOOM)).then((img) => {
-            ctx.drawImage(
-              img,
-              (dx + TILE_RADIUS) * TILE_SIZE,
-              (dy + TILE_RADIUS) * TILE_SIZE,
-              TILE_SIZE,
-              TILE_SIZE
-            );
+          loadImage(grayTileUrl(tx, ty, TILE_ZOOM)).then((img) => {
+            grayCtx.drawImage(img, px, py, TILE_SIZE, TILE_SIZE);
+          })
+        );
+        tasks.push(
+          loadImage(colorTileUrl(tx, ty, TILE_ZOOM)).then((img) => {
+            colorCtx.drawImage(img, px, py, TILE_SIZE, TILE_SIZE);
           })
         );
       }
     }
     await Promise.all(tasks);
 
-    // 貼り合わせた範囲全体(北西の角〜南東の角)の実世界サイズを計算する
+    // モザイクの左上(北西)を原点としたときの、全体地図上のピクセル座標
+    const originPixelX = (cx - TILE_RADIUS) * TILE_SIZE;
+    const originPixelY = (cy - TILE_RADIUS) * TILE_SIZE;
+
+    // 歩いたマスの範囲だけ、カラー版の絵をモノクロ版の上に描き直す
+    coloredGridIds.forEach((gridId) => {
+      const { south, west, north, east } = gridIdToBounds(gridId);
+      const p1 = lonLatToGlobalPixel(west, north, TILE_ZOOM, TILE_SIZE);
+      const p2 = lonLatToGlobalPixel(east, south, TILE_ZOOM, TILE_SIZE);
+
+      const sx = Math.min(p1.px, p2.px) - originPixelX;
+      const sy = Math.min(p1.py, p2.py) - originPixelY;
+      const sw = Math.abs(p2.px - p1.px);
+      const sh = Math.abs(p2.py - p1.py);
+
+      if (sw <= 0 || sh <= 0) return;
+      grayCtx.drawImage(colorCanvas, sx, sy, sw, sh, sx, sy, sw, sh);
+    });
+
+    // 北西・南東の角の実世界サイズ(メートル)を計算し、地面の板のサイズを合わせる
     const nw = tileXYToLonLat(cx - TILE_RADIUS, cy - TILE_RADIUS, TILE_ZOOM);
     const se = tileXYToLonLat(cx + TILE_RADIUS + 1, cy + TILE_RADIUS + 1, TILE_ZOOM);
-
     const nwMeters = latLngToLocalMeters(nw.lat, nw.lon, originLat, originLng);
     const seMeters = latLngToLocalMeters(se.lat, se.lon, originLat, originLng);
 
@@ -84,7 +113,7 @@ async function buildGroundTexture(
     const centerX = (nwMeters.x + seMeters.x) / 2;
     const centerZ = (nwMeters.z + seMeters.z) / 2;
 
-    const texture = new THREE.CanvasTexture(canvas);
+    const texture = new THREE.CanvasTexture(grayCanvas);
     return { texture, width, depth, centerX, centerZ };
   } catch (err) {
     console.error('地図タイルの読み込みに失敗しました', err);
@@ -108,9 +137,7 @@ export default function PhotoScene3D({ photos }: Props) {
     const camera = new THREE.PerspectiveCamera(50, width / height, 0.1, 500);
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
     renderer.setSize(width, height);
-    // スマホでの描画負荷を抑えるため、解像度倍率に上限を設ける
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    // ドラッグ操作をブラウザのスクロールと競合させない
     renderer.domElement.style.touchAction = 'none';
     container.appendChild(renderer.domElement);
 
@@ -119,11 +146,9 @@ export default function PhotoScene3D({ photos }: Props) {
     dirLight.position.set(3, 5, 2);
     scene.add(dirLight);
 
-    // 最初の写真の位置を基準点(原点)にする
     const originLat = photos[0].lat;
     const originLng = photos[0].lng;
 
-    // 地面: まずは仮の色付き板を出しておき、地図タイルが読み込めたら差し替える
     const fallbackGround = new THREE.Mesh(
       new THREE.PlaneGeometry(60, 60),
       new THREE.MeshStandardMaterial({
@@ -137,14 +162,15 @@ export default function PhotoScene3D({ photos }: Props) {
     fallbackGround.position.y = -0.02;
     scene.add(fallbackGround);
 
-    buildGroundTexture(originLat, originLng).then((result) => {
+    // 撮影済み写真の位置から、実際に塗られているグリッドIDの一覧を求める
+    const coloredGridIds = Array.from(new Set(photos.map((p) => toGridId(p.lat, p.lng))));
+
+    buildGroundTexture(originLat, originLng, coloredGridIds).then((result) => {
       if (disposed || !result) return;
       scene.remove(fallbackGround);
 
       const mat = new THREE.MeshStandardMaterial({
         map: result.texture,
-        transparent: true,
-        opacity: 0.75,
         side: THREE.DoubleSide,
       });
       const groundMesh = new THREE.Mesh(new THREE.PlaneGeometry(result.width, result.depth), mat);
@@ -173,7 +199,6 @@ export default function PhotoScene3D({ photos }: Props) {
         const mesh = new THREE.Mesh(geo, mat);
         mesh.position.set(x, baseY, z);
 
-        // 方位(0=北, 90=東...)を、three.jsのY軸回転に変換する
         if (photo.heading !== null) {
           mesh.rotation.y = THREE.MathUtils.degToRad(-photo.heading);
         }
@@ -198,7 +223,9 @@ export default function PhotoScene3D({ photos }: Props) {
 
     let camAngleY = 0.6;
     let camAngleX = 0.5;
-    const radius = 12;
+    let radius = 12;
+    const MIN_RADIUS = 3;
+    const MAX_RADIUS = 30;
 
     function updateCamera() {
       camera.position.x = radius * Math.sin(camAngleY) * Math.cos(camAngleX);
@@ -208,29 +235,62 @@ export default function PhotoScene3D({ photos }: Props) {
     }
     updateCamera();
 
-    let rotating = false;
-    let lastX = 0;
-    let lastY = 0;
     let autoRotate = true;
+    // 現在押されている指(ポインター)を管理し、1本指=回転、2本指=ピンチ拡大縮小を判定する
+    const activePointers = new Map<number, { x: number; y: number }>();
+    let pinchStartDist = 0;
+    let pinchStartRadius = radius;
+
+    function distanceBetween(a: { x: number; y: number }, b: { x: number; y: number }) {
+      return Math.hypot(a.x - b.x, a.y - b.y);
+    }
 
     const onPointerDown = (e: PointerEvent) => {
-      rotating = true;
       autoRotate = false;
-      lastX = e.clientX;
-      lastY = e.clientY;
       renderer.domElement.setPointerCapture(e.pointerId);
+      activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+      if (activePointers.size === 2) {
+        const pts = Array.from(activePointers.values());
+        pinchStartDist = distanceBetween(pts[0], pts[1]);
+        pinchStartRadius = radius;
+      }
     };
-    const onPointerUp = () => {
-      rotating = false;
+
+    const onPointerUp = (e: PointerEvent) => {
+      activePointers.delete(e.pointerId);
     };
+
     const onPointerMove = (e: PointerEvent) => {
-      if (!rotating) return;
-      const dx = e.clientX - lastX;
-      const dy = e.clientY - lastY;
+      if (!activePointers.has(e.pointerId)) return;
+      const prev = activePointers.get(e.pointerId)!;
+
+      if (activePointers.size === 2) {
+        activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+        const pts = Array.from(activePointers.values());
+        const dist = distanceBetween(pts[0], pts[1]);
+        if (pinchStartDist > 0) {
+          const scale = pinchStartDist / dist;
+          radius = Math.max(MIN_RADIUS, Math.min(MAX_RADIUS, pinchStartRadius * scale));
+          updateCamera();
+        }
+        return;
+      }
+
+      // 1本指ドラッグ = 視点回転
+      const dx = e.clientX - prev.x;
+      const dy = e.clientY - prev.y;
       camAngleY -= dx * 0.005;
       camAngleX = Math.max(-0.3, Math.min(1.1, camAngleX + dy * 0.005));
-      lastX = e.clientX;
-      lastY = e.clientY;
+      activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      updateCamera();
+    };
+
+    // PC: マウスホイールで拡大縮小
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      autoRotate = false;
+      radius = Math.max(MIN_RADIUS, Math.min(MAX_RADIUS, radius + e.deltaY * 0.01));
       updateCamera();
     };
 
@@ -238,6 +298,7 @@ export default function PhotoScene3D({ photos }: Props) {
     renderer.domElement.addEventListener('pointerup', onPointerUp);
     renderer.domElement.addEventListener('pointercancel', onPointerUp);
     renderer.domElement.addEventListener('pointermove', onPointerMove);
+    renderer.domElement.addEventListener('wheel', onWheel, { passive: false });
 
     let frameId: number;
     function animate() {
@@ -257,6 +318,7 @@ export default function PhotoScene3D({ photos }: Props) {
       renderer.domElement.removeEventListener('pointerup', onPointerUp);
       renderer.domElement.removeEventListener('pointercancel', onPointerUp);
       renderer.domElement.removeEventListener('pointermove', onPointerMove);
+      renderer.domElement.removeEventListener('wheel', onWheel);
       renderer.dispose();
       container.removeChild(renderer.domElement);
     };

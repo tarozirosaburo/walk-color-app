@@ -24,6 +24,12 @@ export function lonLatToTileXY(lon: number, lat: number, zoom: number) {
   return { x, y };
 }
 
+// タイル座標から、そのズームレベルにおける「全体地図上のピクセル座標」を計算する
+export function lonLatToGlobalPixel(lon: number, lat: number, zoom: number, tileSize: number) {
+  const { x, y } = lonLatToTileXY(lon, lat, zoom);
+  return { px: x * tileSize, py: y * tileSize };
+}
+
 // タイル座標(x, y)から、そのタイルの左上(北西)の緯度経度を計算する
 export function tileXYToLonLat(x: number, y: number, zoom: number) {
   const n = Math.pow(2, zoom);
