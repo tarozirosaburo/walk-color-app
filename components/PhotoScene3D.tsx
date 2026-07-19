@@ -155,9 +155,7 @@ export default function PhotoScene3D({ photos, origin }: Props) {
       new THREE.PlaneGeometry(60, 60),
       new THREE.MeshStandardMaterial({
         color: 0xf1efe8,
-        transparent: true,
-        opacity: 0.55,
-        side: THREE.DoubleSide,
+        side: THREE.FrontSide,
       })
     );
     fallbackGround.rotation.x = -Math.PI / 2;
@@ -173,7 +171,7 @@ export default function PhotoScene3D({ photos, origin }: Props) {
 
       const mat = new THREE.MeshStandardMaterial({
         map: result.texture,
-        side: THREE.DoubleSide,
+        side: THREE.FrontSide,
       });
       const groundMesh = new THREE.Mesh(new THREE.PlaneGeometry(result.width, result.depth), mat);
       groundMesh.rotation.x = -Math.PI / 2;
@@ -187,9 +185,9 @@ export default function PhotoScene3D({ photos, origin }: Props) {
       const { x, z } = latLngToLocalMeters(photo.lat, photo.lng, originLat, originLng);
       const { data } = supabase.storage.from('photos').getPublicUrl(photo.file_path);
 
-      const planeHeight = 1.6;
-      const planeWidth = 1.6;
-      const baseY = 1.2;
+      const planeHeight = 3.2;
+      const planeWidth = 3.2;
+      const baseY = 2.0;
 
       textureLoader.load(data.publicUrl, (texture) => {
         const aspect = texture.image.width / texture.image.height;
@@ -314,7 +312,7 @@ export default function PhotoScene3D({ photos, origin }: Props) {
       const dx = e.clientX - prev.x;
       const dy = e.clientY - prev.y;
       camAngleY -= dx * 0.005;
-      camAngleX = Math.max(-0.3, Math.min(1.1, camAngleX + dy * 0.005));
+      camAngleX = Math.max(0, Math.min(1.1, camAngleX + dy * 0.005));
       activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
       updateCamera();
     };
