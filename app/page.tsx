@@ -6,6 +6,7 @@ import PhotoScene3D from '@/components/PhotoScene3D';
 import PhotoManager from '@/components/PhotoManager';
 import Login from '@/components/Login';
 import { supabase, toGridId } from '@/lib/supabase';
+import { compressImage } from '@/lib/imageCompress';
 
 type PhotoRecord = {
   file_path: string;
@@ -162,12 +163,21 @@ export default function Home() {
       const { latitude, longitude } = position.coords;
       const gridId = toGridId(latitude, longitude);
 
+      setStatus('画像を圧縮中...');
+      let compressedBlob: Blob;
+      try {
+        compressedBlob = await compressImage(file);
+      } catch (err) {
+        console.error(err);
+        compressedBlob = file; // 圧縮に失敗した場合は元の画像のままアップロードする
+      }
+
       setStatus('写真をアップロード中...');
 
       const fileName = `${gridId}_${Date.now()}.jpg`;
       const { error: uploadError } = await supabase.storage
         .from('photos')
-        .upload(fileName, file);
+        .upload(fileName, compressedBlob, { contentType: 'image/jpeg' });
 
       if (uploadError) {
         setStatus('アップロードに失敗しました');
